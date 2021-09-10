@@ -3,8 +3,11 @@ import os
 from typing import List
 import numpy as np
 import datetime
+from pandas.core.frame import DataFrame
 from pandas.core.tools.datetimes import to_time
+import pickle
 import sklearn as sk
+from sklearn.svm import SVR
 import sklearn.preprocessing as pre
 import pandas as pd
 import numpy as np
@@ -44,19 +47,19 @@ class ServiceRecord:
             if any(recordItem == menuItem.key for recordItem in counts):
                 self.record[menuItem.key] = counts[menuItem.key]
             else:
-                self.record[menuItem.key] = -1
+                self.record[menuItem.key] = np.nan
     def GetMenuItemName(self, key: str) -> str:
         for menuItem in self.menu.menuItems:
             if menuItem.key == key:
                 return menuItem.name
 def importServiceRecords(menu:Menu) -> list[ServiceRecord]:
-    location = "E:\ServicePredictorTool\service_records"
+    location = "service_records"
     dirname = os.path.dirname(__file__)
     directory = os.path.join(dirname, location)
-    os.chdir(location)
     records = []
     for file in os.listdir(directory):
-        record = importCsvFile(file)
+        fileDir = os.path.join(directory, file)
+        record = importCsvFile(fileDir)
         header = record.pop(0)
         date = datetime.date.fromisoformat(file[:10])
         serviceRecord = ServiceRecord(date, header[0], header[1], menu)
@@ -77,18 +80,18 @@ def printServiceRecords(records: list[ServiceRecord]):
             row = [name, item]
             csvOut.append(row)
         csvOut.append("")
-    with open("../service_report.csv", 'w') as csvfile:
+    path = os.path.dirname(__file__)
+    path = os.path.join(path, "service_report.csv")
+    with open(path, 'w') as csvfile:
         csvWriter = csv.writer(csvfile)
         csvWriter.writerows(csvOut)
         csvfile.close()
 def parseMenu() -> Menu:
-    menuList = importCsvFile("menu.csv")
+    menuList = importCsvFile("E:\ServicePredictorTool\menu.csv")
     menu = Menu()
     for row in menuList:
         menu.AddMenuItem(Menu.MenuItem(row[0], row[1]))
     return menu
-
-categories = ["Day", "Date", "Days Since Service", "Covers"]
 def appendCategoriesForMenu(list: list, menu: Menu) -> list:
     for menuItem in menu.menuItems:
         list.append(menuItem.key)
@@ -106,6 +109,7 @@ def marshalDataIntoFrame(categories: list, records: list[ServiceRecord], menu: M
         list_for_array.append(row)
     array = np.array(list_for_array)
     df = pd.DataFrame(array, columns=categories).set_index('Date')
+    df.iloc[:,2:] = df.iloc[:, 2:].astype(float)
     return df, categories
 
 def encodeWeekDays(data: pd.DataFrame, categories: list):
@@ -133,13 +137,49 @@ def sliceDataFrame(data: pd.DataFrame, menu: Menu) -> list[pd.DataFrame]:
         itemData.drop(indecies, inplace=True)
         dataFrames.append(itemData)
     return dataFrames
+def findAverageMenuItemCount(df: DataFrame) -> DataFrame:
+
+    countFrame = df.iloc[:, 2:-1]
+    df["countAv"] = countFrame.mean(1)
+    return df
 
 
+def trainModel(menu: Menu):
+    categories = ["Day", "Date", "Days Since Service", "Covers"]
+    records = importServiceRecords(menu)
+    printServiceRecords(records)
+    df,categories = marshalDataIntoFrame(categories, records, menu)
+    eDf = encodeWeekDays(df, categories)
+    eDf = findAverageMenuItemCount(eDf)
+    ### This is broken idk. Need to import direct into Pandas
+    eDf['Days Since Service'].astype(float)
+    print(eDf)
+    svr_poly = SVR(kernel = 'linear', gamma='auto')
+    featureCols = ['dayEncode']
+    X = eDf.loc[:, featureCols]
+    Y = eDf['Covers']
+    weight = eDf['Days Since Service']
+    max = weight.max()
+    weight = weight.sub(max).multiply(-1)
+    print(X.shape, Y.shape, weight.shape)
+    svr_poly.fit(X, Y, sample_weight=weight)
+    print("Fit with last three points:  ",svr_poly.score(X.iloc[-3:].to_numpy(), Y.iloc[-3:]))
+    path = os.path.dirname(__file__)
+    path = os.path.join(path, "svr_pickle.pkl")
+    svrFile = open(path, 'ab')
+    pickle.dump(svr_poly, svrFile)
+    svrFile.close()
+    trainModelForEachItem(menu, eDf, weight)
+def trainModelForEachItem(menu: Menu, df: DataFrame, weight) -> list[SVR]:
+    frame = df.iloc[:, 2:-2]
+    for (columnName, columnData) in frame.iteritems():
+        itemFrame = pd.DataFrame(columnData, dtype=float)
+        itemFrame['Covers'] = df['Covers']
+        itemFrame['dayEncode'] = df['dayEncode']
+        itemFrame['weight'] = weight
+        itemFrame = itemFrame.dropna()
+        print(itemFrame)
+        svr_item = SVR(kernel='linear', gamma='auto')
+        #svr_item.fit(X, columnData.values, sample_weight=weight)
 menu = parseMenu()
-records = importServiceRecords(menu)
-printServiceRecords(records)
-df,categories = marshalDataIntoFrame(categories, records, menu)
-eDf = encodeWeekDays(df, categories)
-print(eDf)
-itemFrames = sliceDataFrame(eDf, menu)
-print(itemFrames)
+trainModel(menu)
